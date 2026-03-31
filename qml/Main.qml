@@ -25,6 +25,11 @@ ApplicationWindow {
     property int rangeEndIndex: -1
     property int xGridTicks: 8
     property int yGridTicks: 8
+    property string rangeStartInputText: "0"
+    property string rangeEndInputText: "-1"
+    property string averageWindowInputText: "5"
+    property string xGridTicksInputText: "8"
+    property string yGridTicksInputText: "8"
     property bool averageEnabled: false
     property int averageWindow: 5
     property bool drawLineEnabled: true
@@ -166,6 +171,35 @@ ApplicationWindow {
         }
     }
 
+    component SoftTextField: TextField {
+        id: tf
+        implicitHeight: 34
+        Layout.preferredHeight: implicitHeight
+        Layout.maximumHeight: implicitHeight
+        font.pixelSize: 13
+        font.family: "Segoe UI"
+        color: root.textMainColor
+        selectedTextColor: "#ffffff"
+        selectionColor: root.accentColor
+        background: Rectangle {
+            radius: 10
+            color: "#ffffff"
+            border.color: tf.activeFocus ? root.accentColor : "#c9d6e8"
+            border.width: 1
+        }
+        padding: 8
+    }
+
+    component AdvancedParamLabel: Label {
+        color: root.textSoftColor
+        font.family: "Segoe UI"
+        Layout.preferredWidth: 148
+        Layout.maximumWidth: 148
+        Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
+        verticalAlignment: Text.AlignVCenter
+        elide: Text.ElideRight
+    }
+
     component MetricInfoBadge: Rectangle {
         id: badge
         property string tipText: ""
@@ -263,6 +297,75 @@ ApplicationWindow {
 
     function markGraphUpdating() {
         graphUpdateToken += 1
+    }
+
+    function parseIntOrFallback(textValue, fallbackValue) {
+        var parsed = parseInt(String(textValue).trim())
+        if (isNaN(parsed))
+            return fallbackValue
+        return parsed
+    }
+
+    function applyRangeStartInput() {
+        var total = maxPointCountForCurrentMode()
+        var startValue = parseIntOrFallback(rangeStartInputText, 0)
+        if (total > 0)
+            startValue = Math.max(0, Math.min(total - 1, startValue))
+        else
+            startValue = 0
+        rangeStartIndex = startValue
+        clampRangeToData()
+        syncAdvancedInputTexts()
+        markGraphUpdating()
+    }
+
+    function applyRangeEndInput() {
+        var total = maxPointCountForCurrentMode()
+        var endValue = parseIntOrFallback(rangeEndInputText, -1)
+        if (endValue < 0) {
+            rangeEndIndex = -1
+        } else if (total > 0) {
+            rangeEndIndex = Math.max(0, Math.min(total - 1, endValue))
+        } else {
+            rangeEndIndex = -1
+        }
+        clampRangeToData()
+        syncAdvancedInputTexts()
+        markGraphUpdating()
+    }
+
+    function applyAverageWindowInput() {
+        var value = parseIntOrFallback(averageWindowInputText, averageWindow)
+        value = Math.max(1, Math.min(101, value))
+        averageWindow = value
+        syncAdvancedInputTexts()
+        markGraphUpdating()
+    }
+
+    function applyXGridTicksInput() {
+        var parsed = Number(String(xGridTicksInputText).trim())
+        var value = isNaN(parsed) ? xGridTicks : Math.round(parsed)
+        value = Math.max(2, Math.min(1000, value))
+        xGridTicks = value
+        syncAdvancedInputTexts()
+        markGraphUpdating()
+    }
+
+    function applyYGridTicksInput() {
+        var parsed = Number(String(yGridTicksInputText).trim())
+        var value = isNaN(parsed) ? yGridTicks : Math.round(parsed)
+        value = Math.max(2, Math.min(1000, value))
+        yGridTicks = value
+        syncAdvancedInputTexts()
+        markGraphUpdating()
+    }
+
+    function syncAdvancedInputTexts() {
+        rangeStartInputText = String(rangeStartIndex)
+        rangeEndInputText = String(rangeEndIndex)
+        averageWindowInputText = String(averageWindow)
+        xGridTicksInputText = String(xGridTicks)
+        yGridTicksInputText = String(yGridTicks)
     }
 
     header: Rectangle {
@@ -431,7 +534,13 @@ ApplicationWindow {
                     SoftComboBox {
                         model: ["Выбранный узел", "Все узлы"]
                         currentIndex: backend.viewMode
-                        onActivated: backend.setViewMode(currentIndex)
+                        onActivated: {
+                            backend.setViewMode(currentIndex)
+                            root.resetRange()
+                            root.clampRangeToData()
+                            root.syncAdvancedInputTexts()
+                            root.markGraphUpdating()
+                        }
                         Layout.fillWidth: true
                     }
 
@@ -446,11 +555,14 @@ ApplicationWindow {
                             currentIndex: backend.selectedNodeIndex >= 0 ? (backend.selectedNodeIndex + 1) : 0
                             enabled: backend.viewMode === 0
                             onActivated: {
-                                root.markGraphUpdating()
                                 if (currentIndex === 0)
                                     backend.setSelectedNodeIndex(-1)
                                 else
                                     backend.setSelectedNodeIndex(currentIndex - 1)
+                                root.resetRange()
+                                root.clampRangeToData()
+                                root.syncAdvancedInputTexts()
+                                root.markGraphUpdating()
                             }
                         }
                     }
@@ -488,81 +600,88 @@ ApplicationWindow {
                 }
 
                 GridLayout {
-                    columns: 2
+                    columns: 3
                     rowSpacing: 8
                     columnSpacing: 8
                     visible: showAdvancedControls
                     Layout.fillWidth: true
 
-                    Label { text: "Начало диапазона"; color: root.textSoftColor; font.family: "Segoe UI" }
-                    SoftSpinBox {
-                        from: 0
-                        to: Math.max(0, root.maxPointCountForCurrentMode() - 1)
-                        value: root.rangeStartIndex
-                        onValueModified: {
-                            root.markGraphUpdating()
-                            root.rangeStartIndex = value
-                        }
+                    AdvancedParamLabel { text: "Начало диапазона" }
+                    SoftTextField {
+                        text: root.rangeStartInputText
+                        onTextChanged: root.rangeStartInputText = text
                         Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+                    SoftGhostButton {
+                        text: "Применить"
+                        implicitWidth: 110
+                        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                        onClicked: root.applyRangeStartInput()
                     }
 
-                    Label { text: "Конец диапазона"; color: root.textSoftColor; font.family: "Segoe UI" }
-                    SoftSpinBox {
-                        from: -1
-                        to: Math.max(-1, root.maxPointCountForCurrentMode() - 1)
-                        value: root.rangeEndIndex
-                        onValueModified: {
-                            root.markGraphUpdating()
-                            root.rangeEndIndex = value
-                        }
+                    AdvancedParamLabel { text: "Конец диапазона" }
+                    SoftTextField {
+                        text: root.rangeEndInputText
+                        onTextChanged: root.rangeEndInputText = text
                         Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+                    SoftGhostButton {
+                        text: "Применить"
+                        implicitWidth: 110
+                        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                        onClicked: root.applyRangeEndInput()
                     }
                 }
 
                 GridLayout {
-                    columns: 2
+                    columns: 3
                     rowSpacing: 8
                     columnSpacing: 8
                     visible: showAdvancedControls
                     Layout.fillWidth: true
 
-                    Label { text: "Окно усреднения"; color: root.textSoftColor; font.family: "Segoe UI" }
-                    SoftSpinBox {
-                        from: 1
-                        to: 101
-                        value: root.averageWindow
-                        stepSize: 1
-                        onValueModified: {
-                            root.markGraphUpdating()
-                            root.averageWindow = value
-                        }
+                    AdvancedParamLabel { text: "Окно усреднения" }
+                    SoftTextField {
+                        text: root.averageWindowInputText
+                        onTextChanged: root.averageWindowInputText = text
                         Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+                    SoftGhostButton {
+                        text: "Применить"
+                        implicitWidth: 110
+                        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                        onClicked: root.applyAverageWindowInput()
                     }
 
-                    Label { text: "Сетка X (линий)"; color: root.textSoftColor; font.family: "Segoe UI" }
-                    SoftSpinBox {
-                        from: 2
-                        to: 20
-                        value: root.xGridTicks
-                        stepSize: 1
-                        onValueModified: {
-                            root.markGraphUpdating()
-                            root.xGridTicks = value
-                        }
+                    AdvancedParamLabel { text: "Сетка X (цель)" }
+                    SoftTextField {
+                        text: root.xGridTicksInputText
+                        onTextChanged: root.xGridTicksInputText = text
                         Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+                    SoftGhostButton {
+                        text: "Применить"
+                        implicitWidth: 110
+                        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                        onClicked: root.applyXGridTicksInput()
                     }
 
-                    Label { text: "Сетка Y (линий)"; color: root.textSoftColor; font.family: "Segoe UI" }
-                    SoftSpinBox {
-                        from: 2
-                        to: 20
-                        value: root.yGridTicks
-                        stepSize: 1
-                        onValueModified: {
-                            root.markGraphUpdating()
-                            root.yGridTicks = value
-                        }
+                    AdvancedParamLabel { text: "Сетка Y (цель)" }
+                    SoftTextField {
+                        text: root.yGridTicksInputText
+                        onTextChanged: root.yGridTicksInputText = text
                         Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+                    SoftGhostButton {
+                        text: "Применить"
+                        implicitWidth: 110
+                        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                        onClicked: root.applyYGridTicksInput()
                     }
                 }
 
@@ -1009,8 +1128,12 @@ ApplicationWindow {
     Connections {
         target: backend
         function onDataChanged() {
+            root.resetRange()
             root.markGraphUpdating()
             root.clampRangeToData()
+            root.syncAdvancedInputTexts()
         }
     }
+
+    Component.onCompleted: root.syncAdvancedInputTexts()
 }

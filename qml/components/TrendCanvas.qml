@@ -442,32 +442,82 @@ Rectangle {
         onWidthChanged: root.requestRepaint()
         onHeightChanged: root.requestRepaint()
 
-        function drawGrid(ctx, l, t, pw, ph) {
+        function drawBackground(ctx, l, t, pw, ph) {
             ctx.fillStyle = "#ffffff"
             ctx.fillRect(0, 0, width, height)
+        }
 
-            ctx.strokeStyle = "#e2ebf5"
-            ctx.lineWidth = 1
-            var xTicks = root.safeTickCount(root.xMajorTicks)
-            var yTicks = root.safeTickCount(root.yMajorTicks)
-            for (var gx = 0; gx <= xTicks; gx++) {
-                var xx = l + (pw / xTicks) * gx
-                ctx.beginPath()
-                ctx.moveTo(xx, t)
-                ctx.lineTo(xx, t + ph)
-                ctx.stroke()
-            }
-            for (var gy = 0; gy <= yTicks; gy++) {
-                var yy = t + (ph / yTicks) * gy
-                ctx.beginPath()
-                ctx.moveTo(l, yy)
-                ctx.lineTo(l + pw, yy)
-                ctx.stroke()
+        function tickDecimals(stepValue) {
+            var s = Math.abs(Number(stepValue))
+            if (!isFinite(s) || s <= 0.0)
+                return 1
+            if (s >= 10.0)
+                return 0
+            if (s >= 1.0)
+                return 1
+            if (s >= 0.1)
+                return 2
+            if (s >= 0.01)
+                return 3
+            return 4
+        }
+
+        function buildAdaptiveTicks(minValue, maxValue, targetTickCount) {
+            var minV = Number(minValue)
+            var maxV = Number(maxValue)
+            var span = Math.abs(maxV - minV)
+            if (!isFinite(minV) || !isFinite(maxV) || span <= 1e-12)
+                return { "values": [minV, maxV], "step": 1.0 }
+
+            function niceNumber(value, roundResult) {
+                var exponent = Math.floor(Math.log(value) / Math.LN10)
+                var fraction = value / Math.pow(10, exponent)
+                var niceFraction = 1.0
+                if (roundResult) {
+                    if (fraction < 1.5)
+                        niceFraction = 1.0
+                    else if (fraction < 3.0)
+                        niceFraction = 2.0
+                    else if (fraction < 7.0)
+                        niceFraction = 5.0
+                    else
+                        niceFraction = 10.0
+                } else {
+                    if (fraction <= 1.0)
+                        niceFraction = 1.0
+                    else if (fraction <= 2.0)
+                        niceFraction = 2.0
+                    else if (fraction <= 5.0)
+                        niceFraction = 5.0
+                    else
+                        niceFraction = 10.0
+                }
+                return niceFraction * Math.pow(10, exponent)
             }
 
-            ctx.strokeStyle = "#b9ccdf"
-            ctx.lineWidth = 1
-            ctx.strokeRect(l, t, pw, ph)
+            // Цель блока в подборе «красивого» фиксированного шага по диапазону.
+            // Он учитывает введенную пользователем цель плотности сетки.
+            var target = Math.max(2, Math.floor(Number(targetTickCount)))
+            var rawStep = span / Math.max(1, (target - 1))
+            if (!isFinite(rawStep) || rawStep <= 0.0)
+                rawStep = 1.0
+            var step = niceNumber(rawStep, true)
+            if (!isFinite(step) || step <= 0.0)
+                step = rawStep
+
+            var start = Math.floor(minV / step) * step
+            var end = Math.ceil(maxV / step) * step
+            var values = []
+            var maxIterations = Math.min(5000, Math.max(50, target * 6))
+            var idx = 0
+            for (var v = start; v <= end + step * 0.5 && idx < maxIterations; v += step) {
+                values.push(v)
+                idx += 1
+            }
+            if (values.length < 2)
+                values = [minV, maxV]
+
+            return { "values": values, "step": step }
         }
 
         function drawLabel(ctx, x, y, text, color) {
@@ -522,7 +572,7 @@ Rectangle {
             root._chartWidth = pw
             root._chartHeight = ph
 
-            drawGrid(ctx, l, t, pw, ph)
+            drawBackground(ctx, l, t, pw, ph)
 
             var dataSeries = root.buildSeriesForRender()
             if (!dataSeries || dataSeries.length <= 0) {
@@ -640,6 +690,34 @@ Rectangle {
                 return t + (1.0 - ratio) * ph
             }
 
+            var xTickData = buildAdaptiveTicks(viewXMin, viewXMax, root.xMajorTicks)
+            var yTickData = buildAdaptiveTicks(viewYMin, viewYMax, root.yMajorTicks)
+            var xTickValues = xTickData.values
+            var yTickValues = yTickData.values
+            var xDecimals = tickDecimals(xTickData.step)
+            var yDecimals = tickDecimals(yTickData.step)
+
+            ctx.save()
+            ctx.strokeStyle = "#e2ebf5"
+            ctx.lineWidth = 1
+            for (var xgi = 0; xgi < xTickValues.length; xgi++) {
+                var gx = mapX(xTickValues[xgi])
+                ctx.beginPath()
+                ctx.moveTo(gx, t)
+                ctx.lineTo(gx, t + ph)
+                ctx.stroke()
+            }
+            for (var ygi = 0; ygi < yTickValues.length; ygi++) {
+                var gy = mapY(yTickValues[ygi])
+                ctx.beginPath()
+                ctx.moveTo(l, gy)
+                ctx.lineTo(l + pw, gy)
+                ctx.stroke()
+            }
+            ctx.strokeStyle = "#b9ccdf"
+            ctx.strokeRect(l, t, pw, ph)
+            ctx.restore()
+
             function pushUnique(target, entry) {
                 if (!entry)
                     return
@@ -748,28 +826,23 @@ Rectangle {
             ctx.fillStyle = "#51667d"
             ctx.textBaseline = "middle"
 
-            var xTicks = root.safeTickCount(root.xMajorTicks)
-            var yTicks = root.safeTickCount(root.yMajorTicks)
-
-            for (var xt = 0; xt <= xTicks; xt++) {
-                var xvTick = viewXMin + ((viewXMax - viewXMin) * xt) / xTicks
-                var xx = l + (pw * xt) / xTicks
+            for (var xt = 0; xt < xTickValues.length; xt++) {
+                var xx = mapX(xTickValues[xt])
                 ctx.textAlign = "center"
-                ctx.fillText(xvTick.toFixed(1), xx, t + ph + 14)
+                ctx.fillText(Number(xTickValues[xt]).toFixed(xDecimals), xx, t + ph + 14)
             }
 
-            for (var yt = 0; yt <= yTicks; yt++) {
-                var yvTick = viewYMax - ((viewYMax - viewYMin) * yt) / yTicks
-                var yy = t + (ph * yt) / yTicks
+            for (var yt = 0; yt < yTickValues.length; yt++) {
+                var yy = mapY(yTickValues[yt])
                 ctx.textAlign = "right"
-                ctx.fillText(yvTick.toFixed(1), l - 6, yy)
+                ctx.fillText(Number(yTickValues[yt]).toFixed(yDecimals), l - 6, yy)
             }
 
             if (root.secondaryYAxisEnabled) {
                 ctx.textAlign = "left"
-                for (var yrt = 0; yrt <= yTicks; yrt++) {
-                    var yvRight = viewYMax - ((viewYMax - viewYMin) * yrt) / yTicks
-                    var yyRight = t + (ph * yrt) / yTicks
+                for (var yrt = 0; yrt < yTickValues.length; yrt++) {
+                    var yvRight = yTickValues[yrt]
+                    var yyRight = mapY(yvRight)
                     var levelTick = root.secondaryLevelFromPeriod(yvRight)
                     if (isFinite(levelTick))
                         ctx.fillText(levelTick.toFixed(1), l + pw + 6, yyRight)
