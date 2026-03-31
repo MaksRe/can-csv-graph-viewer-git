@@ -43,6 +43,7 @@ python main.py
 ## Зависимости
 - `PySide6` — интерфейс и графика.
 - `openpyxl` — чтение `xlsx`.
+- `pyinstaller` — сборка `exe`.
 
 ## Структура проекта
 - `main.py` — точка входа, настройка Qt.
@@ -56,6 +57,26 @@ python main.py
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+## Сборка EXE (PyInstaller)
+В проекте есть полноценный spec-файл и скрипт автоматической сборки:
+- `can_csv_graph_viewer_qml.spec`
+- `build_release.py`
+- `build_version.json`
+
+Команда сборки:
+```bash
+python build_release.py
+```
+
+Что делает скрипт:
+- запускает тесты;
+- увеличивает номер билда в `build_version.json`;
+- передает новую версию в spec-файл;
+- собирает выходной файл с версией в имени.
+
+Пример имени результата:
+`can_csv_graph_viewer_qml_v1.0.1.exe`
 
 ## Примечания
 - Если `xlsx` не читается, проверьте установку `openpyxl`.
