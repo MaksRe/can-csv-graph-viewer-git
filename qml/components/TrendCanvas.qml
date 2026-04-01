@@ -18,6 +18,10 @@ Rectangle {
     property color temperatureColor: "#f97316"
     property int rangeStart: 0
     property int rangeEnd: -1
+    property var temperatureBands: []
+    // 0: температура, 1: время.
+    property int xAxisMode: 0
+    property bool sortLineByX: true
     property bool showPointLabels: false
     property int maxRenderPoints: 1200
     property int maxPointLabels: 60
@@ -187,11 +191,46 @@ Rectangle {
                 "fuel": count > 0 ? (sumFuel / count) : Number(src.fuel),
                 "temperature": count > 0 ? (sumTemp / count) : Number(src.temperature),
                 "time": src.time,
+                "timeSec": src.timeSec,
                 "isHighlight": !!src.isHighlight,
                 "highlightLabel": src.highlightLabel ? String(src.highlightLabel) : ""
             })
         }
         return result
+    }
+
+    function parseTimeToSeconds(timeText, fallbackSeconds) {
+        var raw = String(timeText || "").trim()
+        if (raw.length <= 0)
+            return fallbackSeconds
+        var t = raw
+        var spaceIdx = t.indexOf(" ")
+        if (spaceIdx >= 0)
+            t = t.slice(spaceIdx + 1)
+        var parts = t.split(":")
+        if (parts.length < 3)
+            return fallbackSeconds
+        var hh = Number(parts[0])
+        var mm = Number(parts[1])
+        var ss = Number(parts[2].replace(",", "."))
+        if (!isFinite(hh) || !isFinite(mm) || !isFinite(ss))
+            return fallbackSeconds
+        return hh * 3600.0 + mm * 60.0 + ss
+    }
+
+    function formatSecondsAsTime(secondsValue) {
+        var total = Number(secondsValue)
+        if (!isFinite(total))
+            return "--:--:--"
+        if (total < 0)
+            total = 0
+        var hours = Math.floor(total / 3600.0)
+        var minutes = Math.floor((total - hours * 3600.0) / 60.0)
+        var seconds = total - hours * 3600.0 - minutes * 60.0
+        var secInt = Math.floor(seconds)
+
+        function p2(v) { return (v < 10 ? "0" : "") + String(v) }
+        return p2(hours) + ":" + p2(minutes) + ":" + p2(secInt)
     }
 
     function selectRange(sourcePoints) {
@@ -210,6 +249,7 @@ Rectangle {
                 "fuel": Number(p.fuel),
                 "temperature": Number(p.temperature),
                 "time": p.time,
+                "timeSec": parseTimeToSeconds(p.time, i),
                 "isHighlight": !!p.isHighlight,
                 "highlightLabel": p.highlightLabel ? String(p.highlightLabel) : ""
             })
@@ -218,6 +258,8 @@ Rectangle {
     }
 
     function xValue(point) {
+        if (root.xAxisMode === 1)
+            return isFinite(Number(point.timeSec)) ? Number(point.timeSec) : Number(point._idx)
         return root.swapAxes ? Number(point.fuel) : Number(point.temperature)
     }
 
@@ -260,6 +302,8 @@ Rectangle {
     function xAxisTitle() {
         if (root.customXAxisTitle && root.customXAxisTitle.length > 0)
             return root.customXAxisTitle
+        if (root.xAxisMode === 1)
+            return "Время"
         return root.swapAxes ? "Уровень топлива, %" : "Температура, C"
     }
 
@@ -410,8 +454,11 @@ Rectangle {
     onOverlayModeChanged: handleDataSourceChanged()
     onRangeStartChanged: requestRepaint()
     onRangeEndChanged: requestRepaint()
+    onTemperatureBandsChanged: requestRepaint()
     onShowPointLabelsChanged: requestRepaint()
     onSwapAxesChanged: requestRepaint()
+    onXAxisModeChanged: requestRepaint()
+    onSortLineByXChanged: requestRepaint()
     onSmoothSeriesEnabledChanged: requestRepaint()
     onSmoothSeriesAlphaChanged: requestRepaint()
     onAverageEnabledChanged: requestRepaint()
@@ -561,7 +608,7 @@ Rectangle {
             var l = 52
             var r = root.secondaryYAxisEnabled ? 64 : 14
             var t = 8
-            var b = 26
+            var b = root.xAxisMode === 1 ? 84 : 26
             var pw = w - l - r
             var ph = h - t - b
             if (pw <= 2 || ph <= 2)
@@ -696,6 +743,29 @@ Rectangle {
             var yTickValues = yTickData.values
             var xDecimals = tickDecimals(xTickData.step)
             var yDecimals = tickDecimals(yTickData.step)
+            var timeRefPoints = null
+            if (root.xAxisMode === 1 && dataSeries.length > 0)
+                timeRefPoints = dataSeries[0].points
+
+            function nearestTemperatureAtTime(referencePoints, targetX) {
+                if (!referencePoints || referencePoints.length <= 0)
+                    return NaN
+                var nearestTemp = NaN
+                var nearestDx = Number.POSITIVE_INFINITY
+                for (var ni = 0; ni < referencePoints.length; ni++) {
+                    var p = referencePoints[ni]
+                    var px = root.xValue(p)
+                    var pt = Number(p.temperature)
+                    if (!isFinite(px) || !isFinite(pt))
+                        continue
+                    var dx = Math.abs(px - targetX)
+                    if (dx < nearestDx) {
+                        nearestDx = dx
+                        nearestTemp = pt
+                    }
+                }
+                return nearestTemp
+            }
 
             ctx.save()
             ctx.strokeStyle = "#e2ebf5"
@@ -718,6 +788,46 @@ Rectangle {
             ctx.strokeRect(l, t, pw, ph)
             ctx.restore()
 
+            if (!root.swapAxes && root.temperatureBands && root.temperatureBands.length > 0) {
+                for (var bi = 0; bi < root.temperatureBands.length; bi++) {
+                    var band = root.temperatureBands[bi]
+                    if (!band)
+                        continue
+
+                    var bandStart = Number(band.startTemp)
+                    var bandEnd = Number(band.endTemp)
+                    if (!isFinite(bandStart) || !isFinite(bandEnd))
+                        continue
+                    if (bandEnd < bandStart) {
+                        var tmpBand = bandStart
+                        bandStart = bandEnd
+                        bandEnd = tmpBand
+                    }
+                    if (bandEnd < viewXMin || bandStart > viewXMax)
+                        continue
+
+                    var rx0 = Math.max(viewXMin, bandStart)
+                    var rx1 = Math.min(viewXMax, bandEnd)
+                    var px0 = mapX(rx0)
+                    var px1 = mapX(rx1)
+                    var rectX = Math.min(px0, px1)
+                    var rectW = Math.max(2, Math.abs(px1 - px0))
+
+                    ctx.save()
+                    ctx.fillStyle = "rgba(239, 68, 68, 0.12)"
+                    ctx.strokeStyle = "rgba(220, 38, 38, 0.40)"
+                    ctx.lineWidth = 1
+                    ctx.fillRect(rectX, t, rectW, ph)
+                    ctx.strokeRect(rectX, t, rectW, ph)
+                    ctx.restore()
+
+                    if (band.label) {
+                        var bandLabelX = rectX + rectW * 0.5
+                        drawLabel(ctx, bandLabelX, t + 16, String(band.label), "#dc2626")
+                    }
+                }
+            }
+
             function pushUnique(target, entry) {
                 if (!entry)
                     return
@@ -739,6 +849,9 @@ Rectangle {
                     var yv = root.yValue(point)
                     if (!isFinite(xv) || !isFinite(yv))
                         return null
+                    var rawTemp = Number(point.temperature)
+                    if (!isFinite(rawTemp))
+                        rawTemp = NaN
                     var highlightEnabled = !!(point && point.isHighlight)
                     var highlightLabel = ""
                     if (highlightEnabled && point.highlightLabel !== undefined && point.highlightLabel !== null)
@@ -749,12 +862,60 @@ Rectangle {
                         "y": mapY(yv),
                         "rawX": xv,
                         "rawY": yv,
+                        "rawTemp": rawTemp,
                         "isHighlight": highlightEnabled,
                         "highlightLabel": highlightLabel
                     }
                     if (!isFinite(entry.x) || !isFinite(entry.y))
                         return null
                     return entry
+                }
+
+                // Цель ветки в сохранении честной формы временного графика.
+                // Она оставляет только последовательные точки и не добавляет min/max из бакетов.
+                if (root.xAxisMode === 1) {
+                    var timeLimit = Math.max(400, Math.floor(Number(root.maxRenderPoints)))
+                    var bucketCount = Math.max(1, Math.min(total, Math.floor(timeLimit / 2)))
+                    var bucketSize = Math.max(1, Math.ceil(total / bucketCount))
+
+                    for (var startT = 0; startT < total; startT += bucketSize) {
+                        var endT = Math.min(total, startT + bucketSize)
+                        var firstT = null
+                        var lastT = null
+                        var minT = null
+                        var maxT = null
+
+                        for (var jt = startT; jt < endT; jt++) {
+                            var eT = addRawPoint(sourcePoints[jt], jt)
+                            if (!eT)
+                                continue
+                            if (!firstT) {
+                                firstT = eT
+                                minT = eT
+                                maxT = eT
+                            }
+                            lastT = eT
+                            if (eT.y < minT.y)
+                                minT = eT
+                            if (eT.y > maxT.y)
+                                maxT = eT
+                        }
+
+                        if (!firstT)
+                            continue
+
+                        pushUnique(result, firstT)
+                        var midsT = []
+                        if (minT && minT.idx !== firstT.idx && minT.idx !== lastT.idx)
+                            midsT.push(minT)
+                        if (maxT && maxT.idx !== firstT.idx && maxT.idx !== lastT.idx && maxT.idx !== minT.idx)
+                            midsT.push(maxT)
+                        midsT.sort(function(a, b) { return a.idx - b.idx })
+                        for (var mt = 0; mt < midsT.length; mt++)
+                            pushUnique(result, midsT[mt])
+                        pushUnique(result, lastT)
+                    }
+                    return result
                 }
 
                 if (total <= denseLimit) {
@@ -828,8 +989,28 @@ Rectangle {
 
             for (var xt = 0; xt < xTickValues.length; xt++) {
                 var xx = mapX(xTickValues[xt])
-                ctx.textAlign = "center"
-                ctx.fillText(Number(xTickValues[xt]).toFixed(xDecimals), xx, t + ph + 14)
+                if (root.xAxisMode === 1) {
+                    var timeLine = root.formatSecondsAsTime(xTickValues[xt])
+                    var tempLine = ""
+                    var tempAtTick = nearestTemperatureAtTime(timeRefPoints, xTickValues[xt])
+                    if (isFinite(tempAtTick))
+                        tempLine = tempAtTick.toFixed(1) + "°C"
+                    ctx.save()
+                    ctx.translate(xx - 2, t + ph + 42)
+                    ctx.rotate(-Math.PI / 3.2)
+                    ctx.textAlign = "right"
+                    ctx.textBaseline = "alphabetic"
+                    if (tempLine.length > 0) {
+                        ctx.fillText(timeLine, 0, -4)
+                        ctx.fillText(tempLine, 0, 10)
+                    } else {
+                        ctx.fillText(timeLine, 0, 2)
+                    }
+                    ctx.restore()
+                } else {
+                    ctx.textAlign = "center"
+                    ctx.fillText(Number(xTickValues[xt]).toFixed(xDecimals), xx, t + ph + 14)
+                }
             }
 
             for (var yt = 0; yt < yTickValues.length; yt++) {
@@ -874,19 +1055,47 @@ Rectangle {
 
                 if (root.drawLineEnabled) {
                     var linePoints = renderPoints.slice(0)
-                    linePoints.sort(function(a, b) { return a.rawX - b.rawX })
+                    if (root.sortLineByX)
+                        linePoints.sort(function(a, b) { return a.rawX - b.rawX })
                     ctx.strokeStyle = color
                     ctx.lineWidth = 1.8
                     ctx.globalAlpha = 0.85
                     ctx.beginPath()
-                    if (linePoints.length <= 2) {
+                    if (linePoints.length <= 2 || root.xAxisMode === 1) {
+                        var timeGapThreshold = Number.POSITIVE_INFINITY
+                        if (root.xAxisMode === 1 && linePoints.length > 3) {
+                            var dxList = []
+                            for (var dxi = 1; dxi < linePoints.length; dxi++) {
+                                var dxVal = linePoints[dxi].rawX - linePoints[dxi - 1].rawX
+                                if (isFinite(dxVal) && dxVal > 0.0)
+                                    dxList.push(dxVal)
+                            }
+                            if (dxList.length > 0) {
+                                dxList.sort(function(a, b) { return a - b })
+                                var medianDx = dxList[Math.floor(dxList.length / 2)]
+                                var fullSpan = Math.max(1.0, root._drawXMax - root._drawXMin)
+                                timeGapThreshold = Math.max(medianDx * 8.0, fullSpan / 14.0)
+                            }
+                        }
                         for (var li = 0; li < linePoints.length; li++) {
                             var px = linePoints[li].x
                             var py = linePoints[li].y
-                            if (li === 0)
+                            if (li === 0) {
                                 ctx.moveTo(px, py)
-                            else
-                                ctx.lineTo(px, py)
+                            } else {
+                                var prevPx = linePoints[li - 1].x
+                                var prevPy = linePoints[li - 1].y
+                                var currDx = linePoints[li].rawX - linePoints[li - 1].rawX
+                                if (root.xAxisMode === 1 && isFinite(currDx) && currDx > timeGapThreshold) {
+                                    ctx.moveTo(px, py)
+                                } else if (Math.abs(px - prevPx) < 0.5 && Math.abs(py - prevPy) < 0.5) {
+                                    // Цель проверки в пропуске почти дублирующих точек.
+                                    // Она снижает ложные «плашки» при плотных данных.
+                                    continue
+                                } else {
+                                    ctx.lineTo(px, py)
+                                }
+                            }
                         }
                     } else {
                         ctx.moveTo(linePoints[0].x, linePoints[0].y)
@@ -918,13 +1127,19 @@ Rectangle {
 
                 if (root.showPointLabels) {
                     var maxLabels = Math.max(1, Number(root.maxPointLabels))
+                    if (root.xAxisMode === 1)
+                        maxLabels = Math.max(120, Math.floor(maxLabels * 2.4))
                     var labelStep = Math.max(1, Math.ceil(renderPoints.length / maxLabels))
                     for (var lb = 0; lb < renderPoints.length; lb += labelStep) {
                         var lx = renderPoints[lb].x
                         var ly = renderPoints[lb].y
                         if (lx < l || lx > (l + pw) || ly < t || ly > (t + ph))
                             continue
-                        var valueText = renderPoints[lb].rawX.toFixed(1) + ", " + renderPoints[lb].rawY.toFixed(1)
+                        var valueText = ""
+                        if (root.xAxisMode === 1 && isFinite(renderPoints[lb].rawTemp))
+                            valueText = renderPoints[lb].rawTemp.toFixed(1) + "°C"
+                        else
+                            valueText = renderPoints[lb].rawX.toFixed(1) + ", " + renderPoints[lb].rawY.toFixed(1)
                         drawLabel(ctx, lx, ly - 6, valueText, color)
                     }
                 }

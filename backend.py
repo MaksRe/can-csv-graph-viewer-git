@@ -33,6 +33,10 @@ class CsvTrendBackend(QObject):
         self._visible_series_cache: list[dict[str, object]] = []
         self._node_visibility_rows_cache: list[dict[str, object]] = []
         self._node_metrics_rows_cache: list[dict[str, object]] = []
+        self._fuel_deviation_threshold = 2.0
+        self._critical_ranges_cache: list[dict[str, object]] = []
+        self._selected_summary_metrics_cache: dict[str, object] = {}
+        self._min_temp_range_span_c = 1.0
         self._palette = [
             "#2563eb", "#10b981", "#f97316", "#8b5cf6", "#ef4444", "#14b8a6", "#0ea5e9", "#a855f7",
             "#f59e0b", "#22c55e", "#3b82f6", "#e11d48",
@@ -147,6 +151,121 @@ class CsvTrendBackend(QObject):
         """Форматирует число для отображения в UI."""
         return f"{float(value):.{int(digits)}f}"
 
+    @staticmethod
+    def _compute_threshold_ranges(points: list[dict[str, object]], threshold: float) -> list[dict[str, float]]:
+        """Находит температурные диапазоны, где модуль уровня топлива превышает заданный порог."""
+        if len(points) <= 0:
+            return []
+
+        sorted_points = sorted(points, key=lambda item: float(item["temp"]))
+        threshold_abs = abs(float(threshold))
+        ranges: list[dict[str, float]] = []
+
+        current_start: float | None = None
+        current_end: float | None = None
+        current_max_abs = 0.0
+
+        for point in sorted_points:
+            temp = float(point["temp"])
+            fuel_abs = abs(float(point["fuel"]))
+            is_above = fuel_abs >= threshold_abs
+
+            if is_above:
+                if current_start is None:
+                    current_start = temp
+                    current_end = temp
+                    current_max_abs = fuel_abs
+                else:
+                    current_end = temp
+                    if fuel_abs > current_max_abs:
+                        current_max_abs = fuel_abs
+            elif current_start is not None and current_end is not None:
+                ranges.append(
+                    {
+                        "startTemp": float(current_start),
+                        "endTemp": float(current_end),
+                        "maxAbsFuel": float(current_max_abs),
+                    }
+                )
+                current_start = None
+                current_end = None
+                current_max_abs = 0.0
+
+        if current_start is not None and current_end is not None:
+            ranges.append(
+                {
+                    "startTemp": float(current_start),
+                    "endTemp": float(current_end),
+                    "maxAbsFuel": float(current_max_abs),
+                }
+            )
+
+        return ranges
+
+    @staticmethod
+    def _merge_temperature_ranges(
+        source_ranges: list[dict[str, float]],
+        merge_tolerance_c: float = 0.2,
+    ) -> list[dict[str, float]]:
+        """Объединяет пересекающиеся и близкие температурные диапазоны в общий список."""
+        if len(source_ranges) <= 0:
+            return []
+
+        sorted_ranges = sorted(source_ranges, key=lambda item: float(item["startTemp"]))
+        merged: list[dict[str, float]] = []
+
+        for item in sorted_ranges:
+            start_temp = float(item["startTemp"])
+            end_temp = float(item["endTemp"])
+            if end_temp < start_temp:
+                start_temp, end_temp = end_temp, start_temp
+            max_abs_fuel = abs(float(item.get("maxAbsFuel", 0.0)))
+
+            if len(merged) <= 0:
+                merged.append({"startTemp": start_temp, "endTemp": end_temp, "maxAbsFuel": max_abs_fuel})
+                continue
+
+            tail = merged[-1]
+            if start_temp <= float(tail["endTemp"]) + float(merge_tolerance_c):
+                tail["endTemp"] = max(float(tail["endTemp"]), end_temp)
+                tail["maxAbsFuel"] = max(abs(float(tail["maxAbsFuel"])), max_abs_fuel)
+            else:
+                merged.append({"startTemp": start_temp, "endTemp": end_temp, "maxAbsFuel": max_abs_fuel})
+
+        return merged
+
+    @staticmethod
+    def _filter_by_min_span(ranges: list[dict[str, float]], min_span_c: float) -> list[dict[str, float]]:
+        """Оставляет только протяженные температурные диапазоны и исключает точечные выбросы."""
+        if len(ranges) <= 0:
+            return []
+        min_span = max(0.0, float(min_span_c))
+        filtered: list[dict[str, float]] = []
+        for item in ranges:
+            span = abs(float(item["endTemp"]) - float(item["startTemp"]))
+            if span + 1e-9 >= min_span:
+                filtered.append(item)
+        return filtered
+
+    def _get_long_threshold_ranges(self, points: list[dict[str, object]], threshold: float) -> list[dict[str, float]]:
+        """Собирает диапазоны выше порога, объединяет соседние и оставляет только протяженные участки."""
+        raw_ranges = self._compute_threshold_ranges(points, threshold)
+        merged_ranges = self._merge_temperature_ranges(raw_ranges)
+        return self._filter_by_min_span(merged_ranges, self._min_temp_range_span_c)
+
+    @staticmethod
+    def _format_ranges_short(ranges: list[dict[str, float]]) -> str:
+        """Формирует короткий текст диапазонов для вывода в метриках."""
+        if len(ranges) <= 0:
+            return "Нет диапазонов выше порога."
+        parts: list[str] = []
+        for item in ranges:
+            parts.append(
+                f"{float(item['startTemp']):.1f}..{float(item['endTemp']):.1f} °C"
+                f" (до {abs(float(item['maxAbsFuel'])):.2f} %)"
+            )
+        return "; ".join(parts)
+
     def _compute_node_metrics(self, node_label: str, points: list[dict[str, object]]) -> dict[str, object]:
         """Рассчитывает ключевые метрики одного узла по его точкам графика."""
         if len(points) <= 0:
@@ -165,6 +284,8 @@ class CsvTrendBackend(QObject):
                 "driftSlope": 0.0,
                 "minPointText": "Нет данных",
                 "maxPointText": "Нет данных",
+                "thresholdRangeCount": 0,
+                "thresholdRangesText": "Нет диапазонов выше порога.",
             }
 
         normalized: list[dict[str, object]] = []
@@ -203,6 +324,7 @@ class CsvTrendBackend(QObject):
             f"Макс: {self._format_float(fuel_max)}% "
             f"при T={self._format_float(float(max_fuel_point['temp']))}°C, t={max_fuel_point['time']}"
         )
+        threshold_ranges = self._get_long_threshold_ranges(normalized, self._fuel_deviation_threshold)
 
         return {
             "node": node_label,
@@ -219,6 +341,8 @@ class CsvTrendBackend(QObject):
             "driftSlope": drift_slope,
             "minPointText": min_point_text,
             "maxPointText": max_point_text,
+            "thresholdRangeCount": len(threshold_ranges),
+            "thresholdRangesText": self._format_ranges_short(threshold_ranges),
         }
 
     def _rebuild_node_metrics_rows_cache(self) -> None:
@@ -227,6 +351,72 @@ class CsvTrendBackend(QObject):
         for item in self._series:
             rows.append(self._compute_node_metrics(str(item.node), item.points))
         self._node_metrics_rows_cache = rows
+
+    def _rebuild_critical_ranges_cache(self) -> None:
+        """Пересчитывает агрегированные диапазоны превышения порога для выбранных серий."""
+        all_ranges: list[dict[str, float]] = []
+        threshold = abs(float(self._fuel_deviation_threshold))
+
+        for series_item in self._visible_series_cache:
+            points = list(series_item.get("points", []))
+            if len(points) <= 0:
+                continue
+            normalized_points: list[dict[str, object]] = []
+            for point in points:
+                normalized_points.append(
+                    {
+                        "temp": float(point.get("temperature", 0.0)),
+                        "fuel": float(point.get("fuel", 0.0)),
+                    }
+                )
+            all_ranges.extend(self._compute_threshold_ranges(normalized_points, threshold))
+
+        merged = self._merge_temperature_ranges(all_ranges)
+        merged = self._filter_by_min_span(merged, self._min_temp_range_span_c)
+        output: list[dict[str, object]] = []
+        for item in merged:
+            output.append(
+                {
+                    "startTemp": float(item["startTemp"]),
+                    "endTemp": float(item["endTemp"]),
+                    "maxAbsFuel": abs(float(item["maxAbsFuel"])),
+                    "label": (
+                        f"{float(item['startTemp']):.1f}..{float(item['endTemp']):.1f} °C"
+                        f" | до {abs(float(item['maxAbsFuel'])):.2f} %"
+                    ),
+                }
+            )
+        self._critical_ranges_cache = output
+
+    def _rebuild_selected_summary_metrics_cache(self) -> None:
+        """Пересчитывает общие метрики по выбранным узлам и текущему порогу отклонения."""
+        total_series = len(self._visible_series_cache)
+        total_points = 0
+        worst_abs_fuel = 0.0
+        worst_temp = 0.0
+        worst_node = "-"
+
+        for series_item in self._visible_series_cache:
+            node_label = str(series_item.get("node", "-"))
+            for point in list(series_item.get("points", [])):
+                total_points += 1
+                fuel_value = float(point.get("fuel", 0.0))
+                abs_fuel = abs(fuel_value)
+                if abs_fuel > worst_abs_fuel:
+                    worst_abs_fuel = abs_fuel
+                    worst_temp = float(point.get("temperature", 0.0))
+                    worst_node = node_label
+
+        self._selected_summary_metrics_cache = {
+            "seriesCount": total_series,
+            "pointCount": total_points,
+            "threshold": float(self._fuel_deviation_threshold),
+            "rangeCount": len(self._critical_ranges_cache),
+            "rangesText": self._format_ranges_short(self._critical_ranges_cache),
+            "worstAbsFuel": float(worst_abs_fuel),
+            "worstTemp": float(worst_temp),
+            "worstNode": worst_node,
+        }
 
     def _rebuild_visible_series_cache(self) -> None:
         """Пересчитывает кэш отображаемых серий без копирования массивов точек."""
@@ -257,6 +447,8 @@ class CsvTrendBackend(QObject):
                 }
             )
         self._visible_series_cache = result
+        self._rebuild_critical_ranges_cache()
+        self._rebuild_selected_summary_metrics_cache()
 
     def _rebuild_node_visibility_rows_cache(self) -> None:
         """Пересчитывает кэш строк для панели видимости узлов и легенды."""
@@ -332,7 +524,22 @@ class CsvTrendBackend(QObject):
         self._visible_series_cache = []
         self._node_visibility_rows_cache = []
         self._node_metrics_rows_cache = []
+        self._critical_ranges_cache = []
+        self._selected_summary_metrics_cache = {}
         self._status_text = self._build_initial_status_text().replace("CSV-файлы не загружены.", "Данные очищены. CSV-файлы не загружены.")
+        self._emit_all()
+
+    @Slot(float)
+    def setFuelDeviationThreshold(self, threshold: float) -> None:
+        """Обновляет порог отклонения топлива и пересчитывает диапазоны для графика и метрик."""
+        value = max(0.0, float(threshold))
+        if abs(value - self._fuel_deviation_threshold) < 1e-9:
+            return
+        self._fuel_deviation_threshold = value
+        self._rebuild_node_metrics_rows_cache()
+        self._rebuild_critical_ranges_cache()
+        self._rebuild_selected_summary_metrics_cache()
+        self._status_text = f"Порог отклонения обновлён: {value:.2f}%."
         self._emit_all()
 
     @Property(bool, notify=busyChanged)
@@ -483,3 +690,18 @@ class CsvTrendBackend(QObject):
     def nodeMetricsRows(self) -> list[dict[str, object]]:
         """Возвращает вычисленные метрики узлов для аналитического блока в UI."""
         return self._node_metrics_rows_cache
+
+    @Property(float, notify=dataChanged)
+    def fuelDeviationThreshold(self) -> float:
+        """Возвращает текущий порог отклонения топлива для выделения температурных диапазонов."""
+        return float(self._fuel_deviation_threshold)
+
+    @Property("QVariantList", notify=dataChanged)
+    def criticalTemperatureRanges(self) -> list[dict[str, object]]:
+        """Возвращает объединённые диапазоны температур, где отклонение выше порога."""
+        return self._critical_ranges_cache
+
+    @Property("QVariantMap", notify=dataChanged)
+    def selectedSummaryMetrics(self) -> dict[str, object]:
+        """Возвращает сводные метрики по текущему набору отображаемых узлов."""
+        return self._selected_summary_metrics_cache

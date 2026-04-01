@@ -30,10 +30,12 @@ ApplicationWindow {
     property string averageWindowInputText: "5"
     property string xGridTicksInputText: "8"
     property string yGridTicksInputText: "8"
+    property string thresholdInputText: "2.0"
     property bool averageEnabled: false
     property int averageWindow: 5
     property bool drawLineEnabled: true
     property bool drawMarkersEnabled: true
+    property int chartDisplayMode: 0
     property int graphUpdateToken: 0
     readonly property bool graphUpdateInProgress: backend.busy || (trendCanvas ? trendCanvas.repaintPending : false)
 
@@ -154,6 +156,10 @@ ApplicationWindow {
                 border.color: "#c9d6e8"
             }
         }
+        ToolTip.visible: combo.hovered
+        ToolTip.delay: 180
+        ToolTip.timeout: 5000
+        ToolTip.text: combo.displayText
     }
 
     component SoftSpinBox: SpinBox {
@@ -306,6 +312,14 @@ ApplicationWindow {
         return parsed
     }
 
+    function parseFloatOrFallback(textValue, fallbackValue) {
+        var prepared = String(textValue).trim().replace(",", ".")
+        var parsed = Number(prepared)
+        if (isNaN(parsed))
+            return fallbackValue
+        return parsed
+    }
+
     function applyRangeStartInput() {
         var total = maxPointCountForCurrentMode()
         var startValue = parseIntOrFallback(rangeStartInputText, 0)
@@ -360,12 +374,21 @@ ApplicationWindow {
         markGraphUpdating()
     }
 
+    function applyThresholdInput() {
+        var value = parseFloatOrFallback(thresholdInputText, backend.fuelDeviationThreshold)
+        value = Math.max(0.0, value)
+        thresholdInputText = String(value)
+        backend.setFuelDeviationThreshold(value)
+        markGraphUpdating()
+    }
+
     function syncAdvancedInputTexts() {
         rangeStartInputText = String(rangeStartIndex)
         rangeEndInputText = String(rangeEndIndex)
         averageWindowInputText = String(averageWindow)
         xGridTicksInputText = String(xGridTicks)
         yGridTicksInputText = String(yGridTicks)
+        thresholdInputText = Number(backend.fuelDeviationThreshold).toFixed(2)
     }
 
     header: Rectangle {
@@ -511,10 +534,17 @@ ApplicationWindow {
             color: root.cardBg
             border.color: root.cardBorder
 
-            ColumnLayout {
+            ScrollView {
+                id: leftPanelScroll
                 anchors.fill: parent
-                anchors.margins: 12
-                spacing: 10
+                anchors.margins: 8
+                clip: true
+                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                ScrollBar.vertical.policy: ScrollBar.AsNeeded
+
+                ColumnLayout {
+                    width: Math.max(leftPanelScroll.availableWidth, 320)
+                    spacing: 10
 
                 Label {
                     text: "Управление"
@@ -564,6 +594,43 @@ ApplicationWindow {
                                 root.syncAdvancedInputTexts()
                                 root.markGraphUpdating()
                             }
+                        }
+                    }
+
+                    Label { text: "Вид графика"; color: root.textSoftColor; font.family: "Segoe UI" }
+                    SoftComboBox {
+                        Layout.fillWidth: true
+                        model: [
+                            "Температура: общий профиль",
+                            "Время: полный ход испытаний"
+                        ]
+                        currentIndex: root.chartDisplayMode
+                        onActivated: {
+                            root.chartDisplayMode = currentIndex
+                            root.markGraphUpdating()
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    radius: 8
+                    color: "#f8fafc"
+                    border.color: "#d6e2ef"
+                    implicitHeight: modeHintText.implicitHeight + 12
+
+                    Label {
+                        id: modeHintText
+                        anchors.fill: parent
+                        anchors.margins: 6
+                        wrapMode: Text.WordWrap
+                        color: root.textSoftColor
+                        font.family: "Segoe UI"
+                        font.pixelSize: 12
+                        text: {
+                            if (root.chartDisplayMode === 0)
+                                return "Режим для ТУ и диапазонов: показывает общий профиль зависимости уровня топлива от температуры."
+                            return "Режим по времени: показывает полный проход испытаний по реальным временным меткам."
                         }
                     }
                 }
@@ -842,6 +909,164 @@ ApplicationWindow {
                     }
                 }
 
+                Rectangle {
+                    Layout.fillWidth: true
+                    radius: 10
+                    color: "#f8fafc"
+                    border.color: "#d6e2ef"
+                    implicitHeight: thresholdAnalyticsLayout.implicitHeight + 12
+                    clip: true
+
+                    ColumnLayout {
+                        id: thresholdAnalyticsLayout
+                        anchors.fill: parent
+                        anchors.margins: 6
+                        spacing: 8
+
+                        Label {
+                            text: "Анализ диапазонов по порогу отклонения"
+                            color: "#334155"
+                            font.family: "Segoe UI"
+                            font.pixelSize: 13
+                            font.bold: true
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Label {
+                                text: "Порог |уровень|, %:"
+                                color: root.textSoftColor
+                                font.family: "Segoe UI"
+                                font.pixelSize: 12
+                                Layout.preferredWidth: 120
+                                Layout.maximumWidth: 120
+                                elide: Text.ElideRight
+                            }
+
+                            SoftTextField {
+                                Layout.preferredWidth: 84
+                                Layout.maximumWidth: 84
+                                text: root.thresholdInputText
+                                onTextChanged: root.thresholdInputText = text
+                                placeholderText: "2.0"
+                            }
+
+                            SoftGhostButton {
+                                text: "Применить"
+                                implicitWidth: 92
+                                Layout.preferredWidth: 92
+                                Layout.maximumWidth: 92
+                                onClicked: root.applyThresholdInput()
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+
+                        Label {
+                            Layout.fillWidth: true
+                            text: backend.selectedSummaryMetrics && Number(backend.selectedSummaryMetrics.seriesCount || 0) > 0
+                                  ? ("Порог активен: ±" + Number(backend.selectedSummaryMetrics.threshold).toFixed(2) + " %")
+                                  : "Нет данных для анализа"
+                            color: root.textSoftColor
+                            font.family: "Segoe UI"
+                            font.pixelSize: 11
+                            wrapMode: Text.WordWrap
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            visible: backend.selectedSummaryMetrics && Number(backend.selectedSummaryMetrics.seriesCount || 0) > 0
+                            spacing: 6
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                radius: 7
+                                color: "#ffffff"
+                                border.color: "#e2e8f0"
+                                implicitHeight: nodesMetricColumn.implicitHeight + 10
+                                ColumnLayout {
+                                    id: nodesMetricColumn
+                                    anchors.fill: parent
+                                    anchors.margins: 5
+                                    spacing: 2
+                                    Label { text: "Выбранные узлы"; color: root.textSoftColor; font.pixelSize: 11; font.family: "Segoe UI" }
+                                    Label {
+                                        text: String(backend.selectedSummaryMetrics.seriesCount) + " узл., "
+                                              + String(backend.selectedSummaryMetrics.pointCount) + " точек"
+                                        color: root.textMainColor
+                                        font.pixelSize: 12
+                                        font.bold: true
+                                        font.family: "Segoe UI"
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                radius: 7
+                                color: "#ffffff"
+                                border.color: "#e2e8f0"
+                                implicitHeight: maxMetricColumn.implicitHeight + 10
+                                ColumnLayout {
+                                    id: maxMetricColumn
+                                    anchors.fill: parent
+                                    anchors.margins: 5
+                                    spacing: 2
+                                    Label { text: "Макс. отклонение"; color: root.textSoftColor; font.pixelSize: 11; font.family: "Segoe UI" }
+                                    Label {
+                                        text: Number(backend.selectedSummaryMetrics.worstAbsFuel).toFixed(2) + " %"
+                                        color: "#0f172a"
+                                        font.pixelSize: 12
+                                        font.bold: true
+                                        font.family: "Segoe UI"
+                                    }
+                                    Label {
+                                        Layout.fillWidth: true
+                                        text: "Узел " + String(backend.selectedSummaryMetrics.worstNode)
+                                              + ", T=" + Number(backend.selectedSummaryMetrics.worstTemp).toFixed(1) + " °C"
+                                        color: root.textSoftColor
+                                        font.pixelSize: 11
+                                        font.family: "Segoe UI"
+                                        wrapMode: Text.WordWrap
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            visible: backend.selectedSummaryMetrics && Number(backend.selectedSummaryMetrics.seriesCount || 0) > 0
+                            radius: 7
+                            color: "#ffffff"
+                            border.color: "#e2e8f0"
+                            implicitHeight: rangesMetricColumn.implicitHeight + 10
+                            ColumnLayout {
+                                id: rangesMetricColumn
+                                anchors.fill: parent
+                                anchors.margins: 5
+                                spacing: 2
+                                Label { text: "Температурные диапазоны выше порога"; color: root.textSoftColor; font.pixelSize: 11; font.family: "Segoe UI" }
+                                Label {
+                                    text: "Диапазонов: " + String(backend.selectedSummaryMetrics.rangeCount)
+                                    color: root.textMainColor
+                                    font.pixelSize: 12
+                                    font.bold: true
+                                    font.family: "Segoe UI"
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: String(backend.selectedSummaryMetrics.rangesText || "-")
+                                    color: root.textMainColor
+                                    font.family: "Segoe UI"
+                                    font.pixelSize: 12
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Label {
                     text: "Математика по узлам"
                     font.bold: true
@@ -1023,6 +1248,20 @@ ApplicationWindow {
                                                     MetricInfoBadge { tipText: "Разброс уровня топлива относительно среднего." }
                                                     Item { Layout.fillWidth: true }
                                                 }
+
+                                                Label { text: "Диапазоны выше порога"; color: root.textSoftColor; font.family: "Segoe UI" }
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: 6
+                                                    Label {
+                                                        Layout.fillWidth: true
+                                                        text: String(modelData.thresholdRangesText || "-")
+                                                        color: root.textMainColor
+                                                        font.family: "Segoe UI"
+                                                        wrapMode: Text.WordWrap
+                                                    }
+                                                    MetricInfoBadge { tipText: "Температурные участки, где |уровень топлива| выше заданного порога." }
+                                                }
                                             }
                                         }
                                     }
@@ -1032,7 +1271,8 @@ ApplicationWindow {
                     }
                 }
 
-                Item { Layout.fillHeight: true; visible: backend.nodeMetricsRows.length <= 0 }
+                    Item { Layout.fillHeight: true; visible: backend.nodeMetricsRows.length <= 0 }
+                }
             }
         }
 
@@ -1070,6 +1310,13 @@ ApplicationWindow {
                 yMajorTicks: root.yGridTicks
                 rangeStart: root.rangeStartIndex
                 rangeEnd: root.rangeEndIndex
+                temperatureBands: backend.criticalTemperatureRanges
+                xAxisMode: root.chartDisplayMode === 1 ? 1 : 0
+                sortLineByX: root.chartDisplayMode === 0
+                customXAxisTitle: root.chartDisplayMode === 1
+                                  ? "Время"
+                                  : "Температура, °C"
+                customYAxisTitle: "Уровень топлива, %"
                 updateToken: root.graphUpdateToken
             }
 
