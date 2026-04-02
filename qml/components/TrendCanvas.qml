@@ -242,17 +242,35 @@ Rectangle {
             return []
 
         var selected = []
+        var dayOffsetSec = 0.0
+        var prevAbsSec = NaN
         for (var i = normalized.start; i <= normalized.end; i++) {
             var p = sourcePoints[i]
+            var rawSec = parseTimeToSeconds(p.time, i)
+            var absSec = rawSec + dayOffsetSec
+
+            // Цель блока в корректной склейке временной оси между сутками.
+            // Он добавляет смещение 24 часа при переходе времени через полночь.
+            if (isFinite(prevAbsSec) && isFinite(absSec) && absSec < prevAbsSec - 1.0) {
+                dayOffsetSec += 24.0 * 3600.0
+                absSec = rawSec + dayOffsetSec
+            }
+
+            // Цель блока в подавлении мелких обратных скачков меток времени.
+            // Он удерживает монотонность оси, чтобы линия не строила ложные перемычки.
+            if (isFinite(prevAbsSec) && isFinite(absSec) && absSec < prevAbsSec)
+                absSec = prevAbsSec
+
             selected.push({
                 "_idx": i,
                 "fuel": Number(p.fuel),
                 "temperature": Number(p.temperature),
                 "time": p.time,
-                "timeSec": parseTimeToSeconds(p.time, i),
+                "timeSec": absSec,
                 "isHighlight": !!p.isHighlight,
                 "highlightLabel": p.highlightLabel ? String(p.highlightLabel) : ""
             })
+            prevAbsSec = absSec
         }
         return averagePoints(smoothPoints(decimatePoints(selected, root.maxRenderPoints)))
     }
@@ -872,49 +890,20 @@ Rectangle {
                 }
 
                 // Цель ветки в сохранении честной формы временного графика.
-                // Она оставляет только последовательные точки и не добавляет min/max из бакетов.
+                // Она оставляет только последовательные точки во времени и исключает min/max бакетов.
                 if (root.xAxisMode === 1) {
-                    var timeLimit = Math.max(400, Math.floor(Number(root.maxRenderPoints)))
-                    var bucketCount = Math.max(1, Math.min(total, Math.floor(timeLimit / 2)))
-                    var bucketSize = Math.max(1, Math.ceil(total / bucketCount))
+                    var timeLimit = Math.max(800, Math.floor(Number(root.maxRenderPoints)))
+                    var stepT = Math.max(1, Math.ceil(total / timeLimit))
 
-                    for (var startT = 0; startT < total; startT += bucketSize) {
-                        var endT = Math.min(total, startT + bucketSize)
-                        var firstT = null
-                        var lastT = null
-                        var minT = null
-                        var maxT = null
-
-                        for (var jt = startT; jt < endT; jt++) {
-                            var eT = addRawPoint(sourcePoints[jt], jt)
-                            if (!eT)
-                                continue
-                            if (!firstT) {
-                                firstT = eT
-                                minT = eT
-                                maxT = eT
-                            }
-                            lastT = eT
-                            if (eT.y < minT.y)
-                                minT = eT
-                            if (eT.y > maxT.y)
-                                maxT = eT
-                        }
-
-                        if (!firstT)
-                            continue
-
-                        pushUnique(result, firstT)
-                        var midsT = []
-                        if (minT && minT.idx !== firstT.idx && minT.idx !== lastT.idx)
-                            midsT.push(minT)
-                        if (maxT && maxT.idx !== firstT.idx && maxT.idx !== lastT.idx && maxT.idx !== minT.idx)
-                            midsT.push(maxT)
-                        midsT.sort(function(a, b) { return a.idx - b.idx })
-                        for (var mt = 0; mt < midsT.length; mt++)
-                            pushUnique(result, midsT[mt])
-                        pushUnique(result, lastT)
+                    for (var jt = 0; jt < total; jt += stepT) {
+                        var eT = addRawPoint(sourcePoints[jt], jt)
+                        if (eT)
+                            pushUnique(result, eT)
                     }
+
+                    var tailT = addRawPoint(sourcePoints[total - 1], total - 1)
+                    if (tailT)
+                        pushUnique(result, tailT)
                     return result
                 }
 
